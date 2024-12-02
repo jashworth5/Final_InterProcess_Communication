@@ -126,7 +126,6 @@ int main() {
         return 1;
     }
 
-    // Configure bidirectional pipes
     client1->write_fd = pipe1[WRITE_END];
     client1->read_fd = pipe2[READ_END];
     client2->write_fd = pipe2[WRITE_END];
@@ -140,25 +139,42 @@ int main() {
         return 1;
     }
 
+    char input[BUFFER_SIZE];
     if (pid == 0) {  // Child process (Client 2)
         close(pipe1[WRITE_END]);
         close(pipe2[READ_END]);
         
-        char* received_msg = receive_message(client2);
-        if (received_msg) {
-            printf("Client2 received: %s\n", received_msg);
-            free(received_msg);
-            send_message(client2, "Hello from Client2!");
+        while (1) {
+            char* received_msg = receive_message(client2);
+            if (received_msg) {
+                printf("Client2 received: %s\n", received_msg);
+                free(received_msg);
+            }
+            
+            printf("Client2> ");
+            if (fgets(input, BUFFER_SIZE, stdin) == NULL) break;
+            input[strcspn(input, "\n")] = 0;
+            
+            if (strcmp(input, "quit") == 0) break;
+            send_message(client2, input);
         }
     } else {  // Parent process (Client 1)
         close(pipe1[READ_END]);
         close(pipe2[WRITE_END]);
         
-        send_message(client1, "Hello from Client1!");
-        char* received_msg = receive_message(client1);
-        if (received_msg) {
-            printf("Client1 received: %s\n", received_msg);
-            free(received_msg);
+        while (1) {
+            printf("Client1> ");
+            if (fgets(input, BUFFER_SIZE, stdin) == NULL) break;
+            input[strcspn(input, "\n")] = 0;
+            
+            if (strcmp(input, "quit") == 0) break;
+            send_message(client1, input);
+            
+            char* received_msg = receive_message(client1);
+            if (received_msg) {
+                printf("Client1 received: %s\n", received_msg);
+                free(received_msg);
+            }
         }
         wait(NULL);
     }
