@@ -1,7 +1,3 @@
-// chat.h
-#ifndef CHAT_H
-#define CHAT_H
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,6 +9,7 @@
 #define BUFFER_SIZE 1024
 #define READ_END 0
 #define WRITE_END 1
+#define MAX_USERS 10
 
 typedef struct {
     int read_fd;
@@ -20,35 +17,25 @@ typedef struct {
     char* username;
 } ChatClient;
 
-ChatClient* create_client(const char* username);
-void destroy_client(ChatClient* client);
-int send_message(ChatClient* client, const char* message);
-char* receive_message(ChatClient* client);
-void handle_error(const char* message);
-
-#endif
-
-// chat.c
+void handle_error(const char* message) {
+    fprintf(stderr, "Error: %s - %s\n", message, strerror(errno));
+}
 
 ChatClient* create_client(const char* username) {
     if (!username) return NULL;
-
-    ChatClient* client = (ChatClient*)malloc(sizeof(ChatClient));
+    ChatClient* client = malloc(sizeof(ChatClient));
     if (!client) {
         handle_error("Failed to allocate client");
         return NULL;
     }
-
     client->username = strdup(username);
     if (!client->username) {
         free(client);
         handle_error("Failed to allocate username");
         return NULL;
     }
-
     client->read_fd = -1;
     client->write_fd = -1;
-    
     return client;
 }
 
@@ -63,123 +50,127 @@ void destroy_client(ChatClient* client) {
 
 int send_message(ChatClient* client, const char* message) {
     if (!client || !message) return -1;
-
-    size_t username_len = strlen(client->username);
-    size_t message_len = strlen(message);
-    
-    if (username_len + message_len + 3 > BUFFER_SIZE) {
-        handle_error("Message too long");
-        return -1;
-    }
-
     char formatted_msg[BUFFER_SIZE];
     int written = snprintf(formatted_msg, BUFFER_SIZE, "%s: %s", client->username, message);
-    
-    if (written < 0 || written >= BUFFER_SIZE) {
-        handle_error("Message formatting failed");
-        return -1;
-    }
-
-    ssize_t bytes_written = write(client->write_fd, formatted_msg, written + 1);
-    return bytes_written > 0 ? 0 : -1;
+    if (written < 0 || written >= BUFFER_SIZE) return -1;
+    return write(client->write_fd, formatted_msg, written + 1) > 0 ? 0 : -1;
 }
 
 char* receive_message(ChatClient* client) {
     if (!client) return NULL;
-
-    char* buffer = (char*)malloc(BUFFER_SIZE);
-    if (!buffer) {
-        handle_error("Failed to allocate receive buffer");
-        return NULL;
-    }
-
+    char* buffer = malloc(BUFFER_SIZE);
+    if (!buffer) return NULL;
     ssize_t bytes_read = read(client->read_fd, buffer, BUFFER_SIZE - 1);
     if (bytes_read <= 0) {
         free(buffer);
         return NULL;
     }
-
     buffer[bytes_read] = '\0';
     return buffer;
 }
 
-void handle_error(const char* message) {
-    fprintf(stderr, "Error: %s - %s\n", message, strerror(errno));
-}
-
-// main.c
 int main() {
-    int pipe1[2], pipe2[2];
-    
-    if (pipe(pipe1) == -1 || pipe(pipe2) == -1) {
-        handle_error("Pipe creation failed");
+    int num_users;
+    printf("Enter number of users (2-%d): ", MAX_USERS);
+    scanf("%d", &num_users);
+    getchar();
+
+    if (num_users < 2 || num_users > MAX_USERS) {
+        printf("Invalid number of users\n");
         return 1;
     }
 
-    ChatClient* client1 = create_client("User1");
-    ChatClient* client2 = create_client("User2");
+    int pipes[MAX_USERS][2];
+    ChatClient* clients[MAX_USERS];
+    memset(pipes, -1, sizeof(pipes));
+    memset(clients, 0, sizeof(clients));
 
-    if (!client1 || !client2) {
-        handle_error("Failed to create clients");
-        if (client1) destroy_client(client1);
-        if (client2) destroy_client(client2);
-        return 1;
+    // Create pipes
+    for (int i = 0; i < num_users; i++) {
+        if (pipe(pipes[i]) == -1) {
+            handle_error("Pipe creation failed");
+            return 1;
+        }
     }
 
-    client1->write_fd = pipe1[WRITE_END];
-    client1->read_fd = pipe2[READ_END];
-    client2->write_fd = pipe2[WRITE_END];
-    client2->read_fd = pipe1[READ_END];
-
-    pid_t pid = fork();
-    if (pid < 0) {
-        handle_error("Fork failed");
-        destroy_client(client1);
-        destroy_client(client2);
-        return 1;
+    // Create clients
+    for (int i = 0; i < num_users; i++) {
+        char username[BUFFER_SIZE];
+        printf("Enter username for user %d: ", i + 1);
+        if (!fgets(username, BUFFER_SIZE, stdin)) break;
+        username[strcspn(username, "\n")] = 0;
+        
+        clients[i] = create_client(username);
+        if (!clients[i]) return 1;
+        
+        // Set up circular communication
+        clients[i]->write_fd = pipes[i][WRITE_END];
+        clients[i]->read_fd = pipes[(i + 1) % num_users][READ_END];
     }
 
+    // Create child processes
+    pid_t child_pids[MAX_USERS - 1];
+    for (int i = 0; i < num_users - 1; i++) {
+        pid_t pid = fork();
+        if (pid < 0) {
+            handle_error("Fork failed");
+            return 1;
+        }
+        if (pid == 0) {  // Child process
+            ChatClient* client = clients[i];
+            char input[BUFFER_SIZE];
+            
+            while (1) {
+                char* received_msg = receive_message(client);
+                if (received_msg) {
+                    printf("%s\n", received_msg);
+                    free(received_msg);
+                }
+                
+                printf("%s> ", client->username);
+                fflush(stdout);
+                if (!fgets(input, BUFFER_SIZE, stdin)) break;
+                input[strcspn(input, "\n")] = 0;
+                
+                if (strcmp(input, "quit") == 0) break;
+                send_message(client, input);
+            }
+            exit(0);
+        }
+        child_pids[i] = pid;
+    }
+
+    // Parent process handles last user
+    ChatClient* client = clients[num_users - 1];
     char input[BUFFER_SIZE];
-    if (pid == 0) {  // Child process (Client 2)
-        close(pipe1[WRITE_END]);
-        close(pipe2[READ_END]);
+    while (1) {
+        printf("%s> ", client->username);
+        if (!fgets(input, BUFFER_SIZE, stdin)) break;
+        input[strcspn(input, "\n")] = 0;
         
-        while (1) {
-            char* received_msg = receive_message(client2);
-            if (received_msg) {
-                printf("Client2 received: %s\n", received_msg);
-                free(received_msg);
-            }
-            
-            printf("Client2> ");
-            if (fgets(input, BUFFER_SIZE, stdin) == NULL) break;
-            input[strcspn(input, "\n")] = 0;
-            
-            if (strcmp(input, "quit") == 0) break;
-            send_message(client2, input);
-        }
-    } else {  // Parent process (Client 1)
-        close(pipe1[READ_END]);
-        close(pipe2[WRITE_END]);
+        if (strcmp(input, "quit") == 0) break;
+        send_message(client, input);
         
-        while (1) {
-            printf("Client1> ");
-            if (fgets(input, BUFFER_SIZE, stdin) == NULL) break;
-            input[strcspn(input, "\n")] = 0;
-            
-            if (strcmp(input, "quit") == 0) break;
-            send_message(client1, input);
-            
-            char* received_msg = receive_message(client1);
-            if (received_msg) {
-                printf("Client1 received: %s\n", received_msg);
-                free(received_msg);
-            }
+        char* received_msg = receive_message(client);
+        if (received_msg) {
+            printf("%s\n", received_msg);
+            free(received_msg);
         }
-        wait(NULL);
     }
 
-    destroy_client(client1);
-    destroy_client(client2);
+    // Cleanup
+    for (int i = 0; i < num_users - 1; i++) {
+        if (child_pids[i] > 0) {
+            kill(child_pids[i], SIGTERM);
+            waitpid(child_pids[i], NULL, 0);
+        }
+    }
+
+    for (int i = 0; i < num_users; i++) {
+        if (clients[i]) destroy_client(clients[i]);
+        close(pipes[i][READ_END]);
+        close(pipes[i][WRITE_END]);
+    }
+
     return 0;
 }
