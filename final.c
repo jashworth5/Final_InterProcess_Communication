@@ -73,15 +73,19 @@ int main() {
     int num_users;
     printf("Enter number of users (2-%d): ", MAX_USERS);
     scanf("%d", &num_users);
-    getchar();  // Consume newline
+    getchar();
 
     if (num_users < 2 || num_users > MAX_USERS) {
         printf("Invalid number of users\n");
         return 1;
     }
 
-    // Create pipes
     int pipes[MAX_USERS][2];
+    ChatClient* clients[MAX_USERS];
+    memset(pipes, -1, sizeof(pipes));
+    memset(clients, 0, sizeof(clients));
+
+    // Create pipes
     for (int i = 0; i < num_users; i++) {
         if (pipe(pipes[i]) == -1) {
             handle_error("Pipe creation failed");
@@ -90,21 +94,22 @@ int main() {
     }
 
     // Create clients
-    ChatClient* clients[MAX_USERS];
     for (int i = 0; i < num_users; i++) {
         char username[BUFFER_SIZE];
         printf("Enter username for user %d: ", i + 1);
-        fgets(username, BUFFER_SIZE, stdin);
+        if (!fgets(username, BUFFER_SIZE, stdin)) break;
         username[strcspn(username, "\n")] = 0;
         
         clients[i] = create_client(username);
         if (!clients[i]) return 1;
         
+        // Set up circular communication
         clients[i]->write_fd = pipes[i][WRITE_END];
         clients[i]->read_fd = pipes[(i + 1) % num_users][READ_END];
     }
 
     // Create child processes
+    pid_t child_pids[MAX_USERS - 1];
     for (int i = 0; i < num_users - 1; i++) {
         pid_t pid = fork();
         if (pid < 0) {
@@ -124,7 +129,7 @@ int main() {
                 
                 printf("%s> ", client->username);
                 fflush(stdout);
-                if (fgets(input, BUFFER_SIZE, stdin) == NULL) break;
+                if (!fgets(input, BUFFER_SIZE, stdin)) break;
                 input[strcspn(input, "\n")] = 0;
                 
                 if (strcmp(input, "quit") == 0) break;
@@ -132,6 +137,7 @@ int main() {
             }
             exit(0);
         }
+        child_pids[i] = pid;
     }
 
     // Parent process handles last user
@@ -139,7 +145,7 @@ int main() {
     char input[BUFFER_SIZE];
     while (1) {
         printf("%s> ", client->username);
-        if (fgets(input, BUFFER_SIZE, stdin) == NULL) break;
+        if (!fgets(input, BUFFER_SIZE, stdin)) break;
         input[strcspn(input, "\n")] = 0;
         
         if (strcmp(input, "quit") == 0) break;
@@ -152,14 +158,16 @@ int main() {
         }
     }
 
-    // Wait for child processes
+    // Cleanup
     for (int i = 0; i < num_users - 1; i++) {
-        wait(NULL);
+        if (child_pids[i] > 0) {
+            kill(child_pids[i], SIGTERM);
+            waitpid(child_pids[i], NULL, 0);
+        }
     }
 
-    // Cleanup
     for (int i = 0; i < num_users; i++) {
-        destroy_client(clients[i]);
+        if (clients[i]) destroy_client(clients[i]);
         close(pipes[i][READ_END]);
         close(pipes[i][WRITE_END]);
     }
